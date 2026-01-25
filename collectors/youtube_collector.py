@@ -6,6 +6,7 @@ Uses YouTube Data API v3
 
 import asyncio
 import aiohttp
+import json
 import os
 import re
 from datetime import datetime, timezone, timedelta
@@ -254,7 +255,7 @@ class YouTubeCollector:
                         signal['metric_type'],
                         signal['metric_value'],
                         signal['url'],
-                        signal['metadata']
+                        json.dumps(signal['metadata'])
                     )
                 except Exception as e:
                     print(f"[YouTube] DB error: {e}")

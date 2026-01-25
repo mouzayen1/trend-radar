@@ -5,6 +5,7 @@ Uses pytrends library (no API key needed)
 """
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Optional
 import sys
@@ -262,7 +263,7 @@ class GoogleTrendsCollector:
                         signal['metric_type'],
                         signal['metric_value'],
                         signal['url'],
-                        signal['metadata']
+                        json.dumps(signal['metadata'])
                     )
                 except Exception as e:
                     # Likely duplicate, skip
