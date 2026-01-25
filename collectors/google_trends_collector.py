@@ -2,10 +2,12 @@
 Google Trends Collector
 Tracks trending searches and breakout terms
 Uses pytrends library (no API key needed)
+Resilient to Google's blocking - retries with backoff
 """
 
 import asyncio
 import json
+import random
 from datetime import datetime, timezone
 from typing import Optional
 import sys
@@ -18,28 +20,35 @@ from pytrends.request import TrendReq
 
 class GoogleTrendsCollector:
     # Categories for Google Trends
-    # https://github.com/pat310/google-trends-api/wiki/Google-Trends-Categories
     CATEGORIES = {
-        0: 'all',           # All categories
-        5: 'computers',     # Computers & Electronics
-        16: 'news',         # News
-        3: 'entertainment', # Arts & Entertainment
-        12: 'business',     # Business & Industrial
-        174: 'gaming',      # Games
+        0: 'all',
+        5: 'computers',
+        16: 'news',
+        3: 'entertainment',
+        12: 'business',
     }
 
-    BREAKOUT_THRESHOLD = 5000  # 5000% growth = breakout
+    # Retry settings
+    MAX_RETRIES = 3
+    BASE_DELAY = 2  # Base delay in seconds
+    MAX_DELAY = 10  # Max delay between retries
 
     def __init__(self, db_pool):
         self.db_pool = db_pool
         self.pytrends = None
 
     async def __aenter__(self):
-        # Initialize pytrends in executor since it makes network calls
+        # Initialize pytrends with resilient settings
         loop = asyncio.get_event_loop()
         self.pytrends = await loop.run_in_executor(
             None,
-            lambda: TrendReq(hl='en-US', tz=360)
+            lambda: TrendReq(
+                hl='en-US',
+                tz=360,
+                timeout=(10, 25),
+                retries=3,
+                backoff_factor=0.5
+            )
         )
         return self
 
@@ -47,100 +56,127 @@ class GoogleTrendsCollector:
         pass
 
     async def collect(self) -> int:
-        """Main collection routine"""
+        """Main collection routine - resilient to failures"""
         print("[GoogleTrends] Starting collection...")
+
+        # Initial delay to avoid hitting Google too fast after other collectors
+        await asyncio.sleep(random.uniform(5, 10))
+
         total_signals = 0
 
-        # Collect daily trending searches
-        try:
-            count = await self.collect_daily_trends()
-            total_signals += count
-        except Exception as e:
-            print(f"[GoogleTrends] Error collecting daily trends: {e}")
+        # Try daily trends first (most reliable)
+        count = await self._safe_collect(self.collect_daily_trends, "daily trends")
+        total_signals += count
 
-        await asyncio.sleep(1)  # Be nice to Google
+        # Random delay between methods
+        await asyncio.sleep(random.uniform(3, 6))
 
-        # Collect realtime trending searches
-        try:
-            count = await self.collect_realtime_trends()
-            total_signals += count
-        except Exception as e:
-            print(f"[GoogleTrends] Error collecting realtime trends: {e}")
+        # Try realtime trends (less reliable but worth trying)
+        count = await self._safe_collect(self.collect_realtime_trends, "realtime trends")
+        total_signals += count
 
-        print(f"[GoogleTrends] Stored {total_signals} signals")
+        if total_signals > 0:
+            print(f"[GoogleTrends] Stored {total_signals} signals")
+        else:
+            print("[GoogleTrends] No signals collected this cycle (Google may be blocking)")
+
         return total_signals
 
+    async def _safe_collect(self, collect_func, name: str) -> int:
+        """Safely run a collection method with retries"""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                count = await collect_func()
+                return count
+            except Exception as e:
+                error_str = str(e)
+
+                # Check for known blocking errors
+                if "404" in error_str or "429" in error_str or "response" in error_str.lower():
+                    delay = min(self.BASE_DELAY * (2 ** attempt) + random.uniform(1, 3), self.MAX_DELAY)
+
+                    if attempt < self.MAX_RETRIES - 1:
+                        print(f"[GoogleTrends] {name} blocked (attempt {attempt + 1}), retrying in {delay:.1f}s...")
+                        await asyncio.sleep(delay)
+                    else:
+                        print(f"[GoogleTrends] {name} failed after {self.MAX_RETRIES} attempts, skipping")
+                else:
+                    print(f"[GoogleTrends] {name} error: {error_str[:100]}")
+                    break
+
+        return 0
+
     async def collect_daily_trends(self) -> int:
-        """Collect daily trending searches"""
+        """Collect daily trending searches - most reliable method"""
         loop = asyncio.get_event_loop()
 
-        try:
-            # Get trending searches for US
-            df = await loop.run_in_executor(
-                None,
-                lambda: self.pytrends.trending_searches(pn='united_states')
-            )
+        # Get trending searches for US
+        df = await loop.run_in_executor(
+            None,
+            lambda: self.pytrends.trending_searches(pn='united_states')
+        )
 
-            if df is None or df.empty:
-                print("[GoogleTrends] No daily trends found")
-                return 0
-
-            trends = df[0].tolist()  # First column contains the trends
-            print(f"[GoogleTrends] Found {len(trends)} daily trending searches")
-
-            signals = []
-            for i, trend in enumerate(trends):
-                if not trend or not isinstance(trend, str):
-                    continue
-
-                trend = trend.strip()
-                if len(trend) < 2:
-                    continue
-
-                if not is_valid_entity(trend.lower()):
-                    continue
-
-                # Rank-based score (higher rank = more trending)
-                rank_score = max(1, 100 - i * 3)  # Top result gets 100, decreasing
-
-                signals.append({
-                    'entity_raw': trend,
-                    'entity_normalized': trend.lower(),
-                    'platform': 'google_trends',
-                    'metric_type': 'daily_trend',
-                    'metric_value': rank_score,
-                    'url': f"https://trends.google.com/trends/explore?q={trend.replace(' ', '%20')}&geo=US",
-                    'metadata': {
-                        'trend_type': 'daily',
-                        'rank': i + 1,
-                        'region': 'US',
-                    }
-                })
-
-            if signals:
-                await self.store_signals(signals)
-
-            return len(signals)
-
-        except Exception as e:
-            print(f"[GoogleTrends] Daily trends error: {e}")
+        if df is None or df.empty:
+            print("[GoogleTrends] No daily trends found")
             return 0
 
+        trends = df[0].tolist()
+        print(f"[GoogleTrends] Found {len(trends)} daily trending searches")
+
+        signals = []
+        for i, trend in enumerate(trends):
+            if not trend or not isinstance(trend, str):
+                continue
+
+            trend = trend.strip()
+            if len(trend) < 2:
+                continue
+
+            if not is_valid_entity(trend.lower()):
+                continue
+
+            # Rank-based score (higher rank = more trending)
+            rank_score = max(1, 100 - i * 3)
+
+            signals.append({
+                'entity_raw': trend,
+                'entity_normalized': trend.lower(),
+                'platform': 'google_trends',
+                'metric_type': 'daily_trend',
+                'metric_value': rank_score,
+                'url': f"https://trends.google.com/trends/explore?q={trend.replace(' ', '%20')}&geo=US",
+                'metadata': {
+                    'trend_type': 'daily',
+                    'rank': i + 1,
+                    'region': 'US',
+                }
+            })
+
+        if signals:
+            await self.store_signals(signals)
+
+        return len(signals)
+
     async def collect_realtime_trends(self) -> int:
-        """Collect realtime trending topics"""
+        """Collect realtime trending topics - less reliable"""
         loop = asyncio.get_event_loop()
         total = 0
 
-        for cat_id, cat_name in self.CATEGORIES.items():
+        # Only try a few categories to reduce API calls
+        categories_to_try = [(0, 'all'), (5, 'computers'), (3, 'entertainment')]
+
+        for cat_id, cat_name in categories_to_try:
             try:
-                # realtime_trending_searches returns trending stories
+                # Random delay between category requests
+                await asyncio.sleep(random.uniform(2, 4))
+
                 df = await loop.run_in_executor(
                     None,
                     lambda cid=cat_id: self.pytrends.realtime_trending_searches(
                         pn='US',
                         cat=cid,
-                        count=20
-                    ) if cid > 0 else self.pytrends.realtime_trending_searches(pn='US', count=20)
+                        count=15
+                    ) if cid > 0 else self.pytrends.realtime_trending_searches(pn='US', count=15)
                 )
 
                 if df is None or df.empty:
@@ -152,7 +188,6 @@ class GoogleTrendsCollector:
                 elif 'entityNames' in df.columns:
                     titles = df['entityNames'].tolist()
                 else:
-                    # Try first column
                     titles = df.iloc[:, 0].tolist()
 
                 signals = []
@@ -160,7 +195,6 @@ class GoogleTrendsCollector:
                     if not title:
                         continue
 
-                    # Handle list of entity names
                     if isinstance(title, list):
                         title = title[0] if title else ''
 
@@ -176,7 +210,7 @@ class GoogleTrendsCollector:
                         'entity_normalized': title.lower(),
                         'platform': 'google_trends',
                         'metric_type': 'realtime_trend',
-                        'metric_value': 100 - i * 4,  # Score based on rank
+                        'metric_value': 100 - i * 4,
                         'url': f"https://trends.google.com/trends/explore?q={title.replace(' ', '%20')}&geo=US",
                         'metadata': {
                             'trend_type': 'realtime',
@@ -191,60 +225,14 @@ class GoogleTrendsCollector:
                     total += len(signals)
                     print(f"[GoogleTrends] Found {len(signals)} realtime trends in {cat_name}")
 
-                await asyncio.sleep(0.5)  # Rate limit
-
             except Exception as e:
-                # Realtime trends often fails, just log and continue
-                if "429" in str(e) or "rate" in str(e).lower():
-                    print(f"[GoogleTrends] Rate limited on {cat_name}, skipping...")
-                    await asyncio.sleep(2)
+                # Don't let one category failure stop others
+                if "429" in str(e) or "404" in str(e):
+                    print(f"[GoogleTrends] {cat_name} blocked, skipping...")
+                    await asyncio.sleep(random.uniform(3, 5))
                 continue
 
         return total
-
-    async def collect_related_queries(self, keyword: str) -> list:
-        """Get related queries for a keyword (for enrichment)"""
-        loop = asyncio.get_event_loop()
-
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: self.pytrends.build_payload([keyword], timeframe='now 1-d', geo='US')
-            )
-
-            related = await loop.run_in_executor(
-                None,
-                lambda: self.pytrends.related_queries()
-            )
-
-            if not related or keyword not in related:
-                return []
-
-            results = []
-
-            # Get rising queries (these show growth %)
-            rising = related[keyword].get('rising')
-            if rising is not None and not rising.empty:
-                for _, row in rising.iterrows():
-                    query = row.get('query', '')
-                    value = row.get('value', 0)
-
-                    # Check for breakout terms
-                    is_breakout = False
-                    if isinstance(value, str) and 'Breakout' in value:
-                        is_breakout = True
-                        value = self.BREAKOUT_THRESHOLD
-
-                    results.append({
-                        'query': query,
-                        'growth': value,
-                        'is_breakout': is_breakout
-                    })
-
-            return results
-
-        except Exception as e:
-            return []
 
     async def store_signals(self, signals: list):
         """Store signals in database"""
@@ -266,5 +254,4 @@ class GoogleTrendsCollector:
                         json.dumps(signal['metadata'])
                     )
                 except Exception as e:
-                    # Likely duplicate, skip
                     pass
