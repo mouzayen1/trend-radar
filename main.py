@@ -15,7 +15,7 @@ import asyncpg
 load_dotenv()
 
 # Import our modules
-from collectors import HackerNewsCollector, GitHubCollector
+from collectors import HackerNewsCollector, GitHubCollector, YouTubeCollector, GoogleTrendsCollector
 from analysis import VelocityAnalyzer
 from alerts import AlertManager
 
@@ -129,6 +129,26 @@ class TrendRadar:
                 return count
         except Exception as e:
             print(f"[Main] GitHub collection error: {e}")
+            return 0
+
+    async def run_youtube_collection(self):
+        """Run YouTube collection"""
+        try:
+            async with YouTubeCollector(self.db_pool) as collector:
+                count = await collector.collect()
+                return count
+        except Exception as e:
+            print(f"[Main] YouTube collection error: {e}")
+            return 0
+
+    async def run_google_trends_collection(self):
+        """Run Google Trends collection"""
+        try:
+            async with GoogleTrendsCollector(self.db_pool) as collector:
+                count = await collector.collect()
+                return count
+        except Exception as e:
+            print(f"[Main] Google Trends collection error: {e}")
             return 0
 
     async def run_analysis(self) -> tuple[list, list]:
@@ -256,7 +276,9 @@ class TrendRadar:
         print("[Main] Running initial data collection...")
         hn_count = await self.run_hn_collection()
         gh_count = await self.run_github_collection()
-        print(f"[Main] Initial collection: HN={hn_count}, GitHub={gh_count}")
+        yt_count = await self.run_youtube_collection()
+        gt_count = await self.run_google_trends_collection()
+        print(f"[Main] Initial collection: HN={hn_count}, GitHub={gh_count}, YouTube={yt_count}, GoogleTrends={gt_count}")
 
         # Run initial analysis
         print("\n[Main] Running initial analysis...")
@@ -271,12 +293,16 @@ class TrendRadar:
         print("\n[Main] Starting scheduled collection loops...")
         print("  - Hacker News: every 10 minutes")
         print("  - GitHub: every 30 minutes")
+        print("  - YouTube: every 30 minutes")
+        print("  - Google Trends: every 60 minutes")
         print("  - Analysis: every 15 minutes")
         print()
 
         await asyncio.gather(
             self.collection_loop("HN", 10, self.run_hn_collection),
             self.collection_loop("GitHub", 30, self.run_github_collection),
+            self.collection_loop("YouTube", 30, self.run_youtube_collection),
+            self.collection_loop("GoogleTrends", 60, self.run_google_trends_collection),
             self.analysis_loop(15),
         )
 
