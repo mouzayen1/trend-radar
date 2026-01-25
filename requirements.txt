@@ -4,5 +4,4 @@ beautifulsoup4==4.12.2
 python-dotenv==1.0.0
 lxml==5.1.0
 google-api-python-client==2.111.0
-pytrends==4.9.3
-urllib3<2.0
+feedparser==6.0.10
