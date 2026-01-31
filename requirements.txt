@@ -5,5 +5,3 @@ python-dotenv==1.0.0
 lxml==5.1.0
 google-api-python-client==2.111.0
 feedparser==6.0.10
-pytrends==4.9.2
-urllib3==1.26.18
