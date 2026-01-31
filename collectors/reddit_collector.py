@@ -175,10 +175,8 @@ class RedditCollector:
             if not entities:
                 return None
 
-            # 5. Validate primary entity
+            # 5. Use primary entity (Reddit already filtered by upvotes/comments)
             primary_entity = entities[0]
-            if not is_valid_entity(primary_entity.lower()):
-                return None
 
             # 6. Check for boost patterns (indicates real trend)
             is_boosted = any(re.search(p, title_lower) for p in self.BOOST_PATTERNS)
@@ -210,7 +208,7 @@ class RedditCollector:
             return None
 
     def extract_entities(self, title: str) -> list:
-        """Extract meaningful entities from post title - STRICT"""
+        """Extract meaningful entities from post title"""
         entities = []
 
         # Clean title
@@ -219,14 +217,12 @@ class RedditCollector:
         # 1. Extract quoted strings (usually product/project names)
         quoted = re.findall(r'"([^"]+)"', title)
         for q in quoted:
-            if 3 <= len(q) <= 50 and is_valid_entity(q.lower()):
+            if 3 <= len(q) <= 50:
                 entities.append(q)
 
         # 2. Extract CamelCase (ProductNames, LibraryNames)
         camel = re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', title)
-        for c in camel:
-            if is_valid_entity(c.lower()):
-                entities.append(c)
+        entities.extend(camel)
 
         # 3. Extract GitHub-style repo names (owner/repo)
         repos = re.findall(r'\b([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)\b', title)
@@ -234,28 +230,22 @@ class RedditCollector:
             if len(r) >= 5:
                 entities.append(r)
 
-        # 4. Extract ALL CAPS acronyms (API, SDK, CLI, etc) - but validate
-        acronyms = re.findall(r'\b([A-Z]{2,6})\b', title)
-        for a in acronyms:
-            if is_valid_entity(a.lower()):
-                entities.append(a)
-
-        # 5. Extract proper nouns (capitalized words not at sentence start)
+        # 4. Extract proper nouns (capitalized words not at sentence start)
         words = title_clean.split()
         for i, word in enumerate(words):
-            # Skip first word (sentence start)
             if i == 0:
                 continue
-            # Check if capitalized and meaningful
+            # Capitalized words (names, products, companies)
             if re.match(r'^[A-Z][a-z]{2,}$', word):
-                if is_valid_entity(word.lower()):
-                    entities.append(word)
+                entities.append(word)
+
+        # 5. Extract ALL CAPS acronyms (allow more through for Reddit)
+        acronyms = re.findall(r'\b([A-Z]{2,6})\b', title)
+        entities.extend(acronyms)
 
         # 6. Extract version patterns like "Python 3.12", "React 19"
         versioned = re.findall(r'\b([A-Z][a-z]+)\s+\d+(?:\.\d+)*\b', title)
-        for v in versioned:
-            if is_valid_entity(v.lower()):
-                entities.append(v)
+        entities.extend(versioned)
 
         # Deduplicate while preserving order
         seen = set()
@@ -265,6 +255,13 @@ class RedditCollector:
             if lower not in seen and len(e) >= 2:
                 seen.add(lower)
                 unique.append(e)
+
+        # FALLBACK: If no entities found, use first 2-3 key words from title
+        if not unique:
+            # Extract first meaningful capitalized phrase
+            match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', title)
+            if match:
+                unique.append(match.group(1))
 
         return unique
 
