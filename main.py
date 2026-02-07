@@ -41,7 +41,8 @@ class TrendRadar:
             self.database_url,
             min_size=2,
             max_size=10,
-            command_timeout=60
+            command_timeout=60,
+            ssl='require'
         )
         print("[Main] Database connection established")
 
