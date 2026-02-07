@@ -1,0 +1,12 @@
+name: Keep Supabase Alive
+
+on:
+  schedule:
+    - cron: '0 0 */5 * *'  # Runs every 5 days
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase
+        run: curl -sf "https://pxppzjfbjhvoezxoeqcv.supabase.co/auth/v1/health"
