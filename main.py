@@ -243,8 +243,41 @@ class TrendRadar:
 
             await asyncio.sleep(interval_minutes * 60)
 
+    async def run_once(self):
+        """Single collection + analysis cycle (for GitHub Actions / cron)"""
+        print("=" * 60)
+        print("  Trend Radar 2.0 - Single Run Mode")
+        print("=" * 60)
+
+        await self.init_database()
+        await self.setup_schema()
+        self.analyzer = VelocityAnalyzer(self.db_pool)
+
+        # Collect from all platforms
+        print("\n[Main] Collecting from all platforms...")
+        hn_count = await self.run_hn_collection()
+        gh_count = await self.run_github_collection()
+        yt_count = await self.run_youtube_collection()
+        gt_count = await self.run_google_trends_collection()
+        rd_count = await self.run_reddit_collection()
+        print(f"[Main] Collected: HN={hn_count}, GitHub={gh_count}, YouTube={yt_count}, GoogleTrends={gt_count}, Reddit={rd_count}")
+
+        # Analyze
+        print("\n[Main] Running analysis...")
+        metrics, anomalies = await self.run_analysis()
+
+        # Alert if warmup is done
+        warmup_done, hours_remaining, total_signals, unique_entities = await self.get_warmup_status()
+        if warmup_done and metrics:
+            await self.run_alerts(metrics, anomalies)
+            print("[Main] Alerts checked")
+        elif not warmup_done:
+            print(f"[Main] Warmup mode: {hours_remaining:.1f}h remaining ({total_signals} signals, {unique_entities} entities)")
+
+        print("[Main] Run complete")
+
     async def run(self):
-        """Main run loop"""
+        """Main run loop (continuous mode)"""
         print("=" * 60)
         print("  Trend Radar 2.0 - Early Trend Detection System")
         print("  STRICT MODE: Cross-platform validation required")
@@ -328,9 +361,13 @@ class TrendRadar:
 
 
 async def main():
+    once = '--once' in sys.argv
     radar = TrendRadar()
     try:
-        await radar.run()
+        if once:
+            await radar.run_once()
+        else:
+            await radar.run()
     except KeyboardInterrupt:
         print("\n[Main] Shutting down...")
     finally:
